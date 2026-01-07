@@ -1,0 +1,6 @@
+GET http://127.0.0.1:9090/api/folders
+Authorization: Bearer ADMIN_SECRET
+
+###
+GET http://127.0.0.1:9090/api/folders/permissions?username=test
+Authorization: Bearer ADMIN_SECRET
