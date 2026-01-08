@@ -116,6 +116,26 @@ public class Db {
             // ignore
         }
         
+        // Миграция: создаем записи permissions для всех пользователей, у которых их нет
+        // Это важно для работы глобальных прав
+        try (Connection c = getConnection();
+             Statement st = c.createStatement()) {
+            try {
+                st.execute("""
+                    INSERT INTO permissions(user_id, r, w, e)
+                    SELECT u.id, 1, 1, 1
+                    FROM users u
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM permissions p WHERE p.user_id = u.id
+                    )
+                    """);
+            } catch (SQLException e) {
+                // Игнорируем ошибки (таблица может не существовать или уже обновлено)
+            }
+        } catch (Exception e) {
+            // Игнорируем ошибки миграции
+        }
+        
         // Теперь выполняем основной SQL скрипт для создания таблиц
         String sql = """
             CREATE TABLE IF NOT EXISTS users (

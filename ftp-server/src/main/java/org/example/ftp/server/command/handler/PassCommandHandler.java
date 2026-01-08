@@ -4,6 +4,7 @@ import org.example.ftp.common.protocol.FtpReplyCode;
 import org.example.ftp.common.protocol.FtpResponse;
 import org.example.ftp.common.protocol.Responses;
 import org.example.ftp.server.session.FtpSession;
+import org.example.ftp.server.session.UnauthenticatedState;
 
 public class PassCommandHandler extends AbstractCommandHandler {
 
@@ -29,15 +30,24 @@ public class PassCommandHandler extends AbstractCommandHandler {
         boolean ok = session.getAuthService().authenticate(username, password);
         if (!ok) {
             session.setPendingUsername(null);
+            session.setState(new UnauthenticatedState());
             return Responses.loginIncorrect();
         }
 
         if (!session.getConnectionLimiter().tryAcquire(username)) {
             session.requestClose();
+            session.setState(new UnauthenticatedState());
             return Responses.error(421, "Too many connections.");
         }
 
         session.authenticate(username);
+
+        // Ensure user has permissions row in database (create if missing)
+        // This is critical for global permissions to work
+        if (session.getPermissionService().getPermissions(username) == null) {
+            session.getPermissionService().setPermissions(username, true, true, true);
+        }
+
         session.getStatsService().onLogin(username);
 
         return Responses.ok(FtpReplyCode.USER_LOGGED_IN.getCode(), "User logged in, proceed.");

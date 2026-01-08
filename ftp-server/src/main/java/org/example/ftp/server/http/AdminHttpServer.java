@@ -34,7 +34,8 @@ public class AdminHttpServer {
             SqliteFolderRepository folderRepo,
             SqliteFolderPermissionRepository folderPermRepo,
             SqliteSharedFolderRepository sharedFolderRepo,
-            SqliteServerSettingsRepository settingsRepo
+            SqliteServerSettingsRepository settingsRepo,
+            java.nio.file.Path ftpRoot
     ) throws Exception
     {
 
@@ -52,6 +53,7 @@ public class AdminHttpServer {
                 folderPermRepo,
                 sharedFolderRepo,
                 settingsRepo,
+                ftpRoot,
                 9090
         );
     }
@@ -71,6 +73,7 @@ public class AdminHttpServer {
             SqliteFolderPermissionRepository folderPermRepo,
             SqliteSharedFolderRepository sharedFolderRepo,
             SqliteServerSettingsRepository settingsRepo,
+            java.nio.file.Path ftpRoot,
 
             int port
     ) throws Exception {
@@ -83,84 +86,110 @@ public class AdminHttpServer {
                     "Stop the previous server instance or run with -Dadmin.port=<freePort>.");
         }
 
-        // No-auth endpoint to bootstrap/update admin token in DB
         server.createContext(
                 "/api/admin-token",
                 new AdminTokenHandler(settingsRepo, adminTokenService)
         );
 
-        // No-auth first-time bootstrap (token + ftp-root path)
         server.createContext(
                 "/api/bootstrap",
                 new BootstrapHandler(adminTokenService)
         );
 
-        var authFilter = new AuthFilter(adminTokenService);
+        server.createContext(
+                "/api/runtime-info",
+                new RuntimeInfoHandler(ftpRoot, adminTokenService)
+        );
+
+        var userAuthFilter = new UserAuthFilter(authService);
 
         server.createContext(
                 "/api/users",
                 new UsersHandler(authService, permissionService)
-        ).getFilters().add(authFilter);
+        );
 
         server.createContext(
                 "/api/user-permissions",
                 new PermissionsHandler(permissionService)
-        ).getFilters().add(authFilter);
+        );
 
         server.createContext(
                 "/api/limits",
                 new LimitsHandler(connectionLimiter, uploadRateLimiter, downloadRateLimiter, settingsRepo, sessionRegistry)
-        ).getFilters().add(authFilter);
+        );
 
         server.createContext(
                 "/api/stats",
                 new StatsHandler(statsService)
-        ).getFilters().add(authFilter);
+        );
 
         server.createContext(
                 "/api/stats/live",
                 new LiveStatsHandler(statsService, connectionLimiter)
-        ).getFilters().add(authFilter);
+        );
 
         server.createContext(
                 "/api/folders",
                 new FoldersHandler(folderRepo)
-        ).getFilters().add(authFilter);
+        );
 
         server.createContext(
                 "/api/folders/permissions",
                 new FolderPermissionsGetHandler(userRepo, folderRepo, folderPermRepo)
-        ).getFilters().add(authFilter);
+        );
 
         server.createContext(
                 "/api/folders/permissions/save",
                 new FolderPermissionsPostHandler(userRepo, folderRepo, folderPermRepo)
-        ).getFilters().add(authFilter);
+        );
 
+        // Admin endpoint: view all shared folders from database
+        server.createContext(
+                "/api/shared-folders/all",
+                new SharedFoldersAdminHandler(userRepo, sharedFolderRepo)
+        );
+
+        // Admin endpoint: delete shared folders from database (no auth required)
+        server.createContext(
+                "/api/shared-folders/all/delete",
+                new SharedFoldersAdminDeleteHandler(sharedFolderRepo)
+        );
+
+        // User endpoints (require user authentication via Basic Auth)
         server.createContext(
                 "/api/shared-folders",
                 new SharedFoldersGetHandler(userRepo, sharedFolderRepo)
-        ).getFilters().add(authFilter);
+        ).getFilters().add(userAuthFilter);
 
         server.createContext(
                 "/api/shared-folders/share",
                 new SharedFoldersPostHandler(userRepo, sharedFolderRepo)
-        ).getFilters().add(authFilter);
+        ).getFilters().add(userAuthFilter);
 
         server.createContext(
                 "/api/shared-folders/delete",
-                new SharedFoldersDeleteHandler(sharedFolderRepo)
-        ).getFilters().add(authFilter);
+                new SharedFoldersDeleteHandler(userRepo, sharedFolderRepo)
+        ).getFilters().add(userAuthFilter);
+
+        RootHandler rootHandler = new RootHandler(ftpRoot);
+        server.createContext(
+                "/api/root",
+                rootHandler
+        );
+        server.createContext(
+                "/api/root/create",
+                rootHandler
+        );
 
         server.createContext(
                 "/api/metrics",
                 new MetricsHandler()
-        ).getFilters().add(authFilter);
+        );
 
         server.createContext(
                 "/api/metrics/reset",
                 new MetricsHandler()
-        ).getFilters().add(authFilter);
+        );
 
         // Static web admin UI (served from classpath: /admin-ui/*)
         // Longest-prefix match ensures /api/* handlers win over "/".

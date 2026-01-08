@@ -1,31 +1,20 @@
 /* FTP Admin UI
  *
  * Uses the admin HTTP API served by ftp-server on :9090 under /api/*.
- * Auth: Authorization: Bearer <token> (token is stored in server DB, you enter it in the UI).
+ * No authentication required.
  */
 
-let currentToken = "";
 let offline = false;
 
 const el = {
   view: document.getElementById("view"),
   banner: document.getElementById("banner"),
-  tokenInput: document.getElementById("tokenInput"),
-  saveTokenBtn: document.getElementById("saveTokenBtn"),
   modal: document.getElementById("modal"),
   modalTitle: document.getElementById("modalTitle"),
   modalBody: document.getElementById("modalBody"),
   modalActions: document.getElementById("modalActions"),
   navLinks: [...document.querySelectorAll(".navlink")]
 };
-
-function getToken() {
-  return (currentToken || "").trim();
-}
-
-function setToken(t) {
-  currentToken = (t || "").trim();
-}
 
 function showBanner(type, msg) {
   el.banner.hidden = false;
@@ -100,8 +89,7 @@ async function apiFetch(path, opts = {}) {
     throw new Error("Server is offline");
   }
   const headers = new Headers(opts.headers || {});
-  const t = getToken();
-  if (t) headers.set("Authorization", `Bearer ${t}`);
+  // No token required - auth removed
   if (opts.json !== undefined) {
     headers.set("Content-Type", "application/json");
   }
@@ -125,12 +113,6 @@ async function apiFetch(path, opts = {}) {
   if (!resp.ok) {
     const bodyMsg = isJson ? (data ? JSON.stringify(data) : "") : (text || "");
     const suffix = bodyMsg ? `: ${bodyMsg}` : "";
-    if (resp.status === 401) {
-      // Token invalid / missing → force re-enter
-      setToken("");
-      el.tokenInput.value = "";
-      await ensureAdminTokenPrompt();
-    }
     throw new Error(`HTTP ${resp.status}${suffix}`);
   }
   return isJson ? data : text;
@@ -162,87 +144,7 @@ async function apiFetchNoAuth(path, opts = {}) {
   return isJson ? data : text;
 }
 
-async function ensureAdminTokenPrompt() {
-  // Avoid stacking modals
-  try { if (el.modal.open) return; } catch (_) {}
-
-  let tokenSet = true;
-  try {
-    const st = await apiFetchNoAuth("/api/admin-token");
-    tokenSet = !!(st && st.tokenSet);
-  } catch (_) {
-    tokenSet = true;
-  }
-
-  let suggestedFtpRoot = "";
-  if (!tokenSet) {
-    try {
-      const bi = await apiFetchNoAuth("/api/bootstrap");
-      suggestedFtpRoot = (bi && bi.suggestedFtpRoot) ? String(bi.suggestedFtpRoot) : "";
-    } catch (_) {
-      suggestedFtpRoot = "";
-    }
-  }
-
-  openModal({
-    title: tokenSet ? "Enter admin token" : "Set admin token",
-    bodyHtml: `
-      <div>
-        <label class="label" for="adminTokenPrompt">${tokenSet ? "Admin token" : "New admin token"}</label>
-        <input id="adminTokenPrompt" class="field" type="text" autocomplete="off" placeholder="token" />
-        <div class="muted" style="margin-top:6px; color:#999;">
-          ${tokenSet ? "Enter the current token to access the admin UI." : "First-time setup: choose a token. You will need it next time."}
-        </div>
-      </div>
-      ${tokenSet ? "" : `
-      <div style="margin-top:14px;">
-        <label class="label" for="ftpRootPrompt">FTP root path (ftp-root)</label>
-        <input id="ftpRootPrompt" class="field" type="text" autocomplete="off"
-               placeholder="e.g. D:\\\\ftp-root"
-               value="${escapeHtml(suggestedFtpRoot)}" />
-        <div class="muted" style="margin-top:6px; color:#999;">
-          This will be applied after server restart. The folder must be writable.
-        </div>
-      </div>
-      `}
-    `,
-    actionsHtml: `
-      <button id="adminTokenApply" class="btn btn-primary" type="button">Continue</button>
-    `,
-    onOpen: () => {
-      const input = document.getElementById("adminTokenPrompt");
-      input.focus();
-      document.getElementById("adminTokenApply").addEventListener("click", async () => {
-        clearBanner();
-        const tok = (input.value || "").trim();
-        if (!tok) {
-          showBanner("warn", "Token is required");
-          return;
-        }
-        try {
-          if (!tokenSet) {
-            const ftpRootEl = document.getElementById("ftpRootPrompt");
-            const ftpRoot = (ftpRootEl ? ftpRootEl.value : "").trim();
-            if (!ftpRoot) {
-              showBanner("warn", "FTP root path is required");
-              return;
-            }
-            const res = await apiFetchNoAuth("/api/bootstrap", { method: "PUT", json: { token: tok, ftpRoot } });
-            // res.restartRequired = true
-            showBanner("warn", "Setup saved. Restart the server to apply the new ftp-root path.");
-          }
-          setToken(tok);
-          el.tokenInput.value = tok;
-          closeModal();
-          location.hash = "#/users";
-          route();
-        } catch (e) {
-          showBanner("err", `Failed to apply token: ${e.message}`);
-        }
-      });
-    }
-  });
-}
+// Token prompt removed - no auth required
 
 function escapeHtml(s) {
   return String(s || "")
@@ -265,6 +167,7 @@ function route() {
     case "users": return renderUsers();
     case "limits": return renderLimits();
     case "permissions": return renderPermissions();
+    case "root": return renderRoot();
     case "stats": return renderStats();
     default:
       location.hash = "#/users";
@@ -273,18 +176,12 @@ function route() {
 }
 
 async function bootstrapAuth() {
-  // Always request token on entry (do not persist between page loads).
-  setToken("");
-  el.tokenInput.value = "";
-  let tokenSet = true;
+  // No auth required - just verify server is online
   try {
-    const st = await apiFetchNoAuth("/api/admin-token");
-    tokenSet = !!(st && st.tokenSet);
-  } catch (_) {
-    tokenSet = true;
+    await apiFetchNoAuth("/api/admin-token");
+  } catch (e) {
+    // Server might be offline, but that's handled by pingServer
   }
-  // If token is not set in DB, this will be "Set admin token", otherwise "Enter admin token".
-  await ensureAdminTokenPrompt();
 }
 
 function setView(html) {
@@ -534,10 +431,18 @@ async function renderLimits() {
               <input id="maxConn" class="field" type="number" min="1" />
             </div>
             <div>
-              <label class="label" for="rateLimit">Global rate limit (bytes/sec)</label>
-              <input id="rateLimit" class="field" type="number" min="0" />
-              <div id="rateHint" class="hint" style="margin-top:6px;"></div>
+              <label class="label" for="uploadLimit">Global upload limit (bytes/sec)</label>
+              <input id="uploadLimit" class="field" type="number" min="0" placeholder="Optional" />
+              <div id="uploadHint" class="hint" style="margin-top:6px;"></div>
             </div>
+          </div>
+          <div class="grid2" style="margin-top: 15px;">
+            <div>
+              <label class="label" for="downloadLimit">Global download limit (bytes/sec)</label>
+              <input id="downloadLimit" class="field" type="number" min="0" placeholder="Optional" />
+              <div id="downloadHint" class="hint" style="margin-top:6px;"></div>
+            </div>
+            <div></div>
           </div>
         </div>
       </div>
@@ -552,16 +457,22 @@ async function renderLimits() {
 async function loadLimits() {
   clearBanner();
   const maxConn = qs("#maxConn");
-  const rateLimit = qs("#rateLimit");
-  const rateHint = qs("#rateHint");
-  rateHint.textContent = "Loading...";
+  const uploadLimit = qs("#uploadLimit");
+  const downloadLimit = qs("#downloadLimit");
+  const uploadHint = qs("#uploadHint");
+  const downloadHint = qs("#downloadHint");
+  uploadHint.textContent = "Loading...";
+  downloadHint.textContent = "";
   try {
     const l = await apiFetch("/api/limits");
     maxConn.value = String(l.globalMaxConnections ?? "");
-    rateLimit.value = String(l.globalRateLimit ?? "");
-    rateHint.textContent = `~ ${fmtBytes(l.globalRateLimit)}/s`;
+    uploadLimit.value = String(l.globalUploadLimit ?? "");
+    downloadLimit.value = String(l.globalDownloadLimit ?? "");
+    uploadHint.textContent = l.globalUploadLimit ? `~ ${fmtBytes(l.globalUploadLimit)}/s` : "";
+    downloadHint.textContent = l.globalDownloadLimit ? `~ ${fmtBytes(l.globalDownloadLimit)}/s` : "";
   } catch (e) {
-    rateHint.textContent = "";
+    uploadHint.textContent = "";
+    downloadHint.textContent = "";
     showBanner("err", `Failed to load limits: ${e.message}`);
   }
 }
@@ -569,24 +480,36 @@ async function loadLimits() {
 async function saveLimits() {
   clearBanner();
   const maxConn = Number(qs("#maxConn").value);
-  const rateLimit = Number(qs("#rateLimit").value);
+  const uploadLimitRaw = qs("#uploadLimit").value.trim();
+  const downloadLimitRaw = qs("#downloadLimit").value.trim();
+  
   if (!Number.isFinite(maxConn) || maxConn < 1) {
     showBanner("warn", "Global max connections must be >= 1");
     return;
   }
-  if (!Number.isFinite(rateLimit) || rateLimit < 0) {
-    showBanner("warn", "Global rate limit must be >= 0");
+  
+  const uploadLimit = uploadLimitRaw === "" ? null : Number(uploadLimitRaw);
+  const downloadLimit = downloadLimitRaw === "" ? null : Number(downloadLimitRaw);
+  
+  if (uploadLimit !== null && (!Number.isFinite(uploadLimit) || uploadLimit < 0)) {
+    showBanner("warn", "Global upload limit must be >= 0 or empty");
     return;
   }
+  if (downloadLimit !== null && (!Number.isFinite(downloadLimit) || downloadLimit < 0)) {
+    showBanner("warn", "Global download limit must be >= 0 or empty");
+    return;
+  }
+  
   try {
+    const json = { globalMaxConnections: maxConn };
+    if (uploadLimit !== null) json.globalUploadLimit = uploadLimit;
+    if (downloadLimit !== null) json.globalDownloadLimit = downloadLimit;
+    
     await apiFetch("/api/limits", {
       method: "PUT",
-      json: { 
-        globalMaxConnections: maxConn, 
-        globalRateLimit: rateLimit
-      }
+      json
     });
-    showBanner("ok", "Limits applied");
+    showBanner("ok", "Limits applied (all active sessions will be disconnected to apply new limits)");
     await loadLimits();
   } catch (e) {
     showBanner("err", `Failed to apply limits: ${e.message}`);
@@ -629,12 +552,12 @@ async function renderPermissions() {
 
         <div class="block">
           <div class="sectiontitle">Shared folders (user-to-user)</div>
-          <div class="sectiondesc">Folders that other users shared with the selected user.</div>
+          <div class="sectiondesc">All shared folders from the database.</div>
           <div class="sectionbody toolbar" style="justify-content:flex-start;">
-            <button id="sharedRefreshBtn" class="btn" type="button">Refresh shared</button>
+            <button id="sharedRefreshBtn" class="btn" type="button">Refresh</button>
           </div>
           <div class="sectionbody">
-            <div class="hint" id="sharedHint">Select user to load shared folders</div>
+            <div class="hint" id="sharedHint">Loading...</div>
           </div>
         </div>
 
@@ -642,9 +565,11 @@ async function renderPermissions() {
           <table>
             <thead>
               <tr>
-                <th style="width: 18%;">Owner</th>
-                <th style="width: 20%;">Name</th>
-                <th style="width: 42%;">Path</th>
+                <th style="width: 15%;">Owner</th>
+                <th style="width: 15%;">Shared with</th>
+                <th style="width: 18%;">Name</th>
+                <th style="width: 35%;">Path</th>
+                <th>R</th>
                 <th>W</th>
                 <th>E</th>
                 <th style="width: 1%;">Actions</th>
@@ -663,9 +588,10 @@ async function renderPermissions() {
   });
   qs("#permUser").addEventListener("change", loadPermissionsForSelected);
 
-  qs("#sharedRefreshBtn").addEventListener("click", loadSharedFoldersForSelected);
+  qs("#sharedRefreshBtn").addEventListener("click", loadAllSharedFolders);
 
   await loadUsersIntoPermSelect();
+  await loadAllSharedFolders();
 }
 
 async function loadUsersIntoPermSelect() {
@@ -709,9 +635,7 @@ async function loadPermissionsForSelected() {
   } catch (e) {
     showBanner("err", `Failed to load global permissions: ${e.message}`);
   }
-
-  // Load shared folders separately (not blocking folder perms UI)
-  loadSharedFoldersForSelected();
+  // Note: We now load all shared folders, not filtered by user
 }
 
 async function saveGlobalPermissions() {
@@ -742,30 +666,25 @@ async function saveGlobalPermissions() {
  * SHARED FOLDERS (user-to-user)
  * ========================= */
 
-async function loadSharedFoldersForSelected() {
+async function loadAllSharedFolders() {
   clearBanner();
-  const username = qs("#permUser")?.value;
   const hint = qs("#sharedHint");
   const tbody = qs("#sharedTbody");
   if (!hint || !tbody) return;
-
-  if (!username) {
-    hint.textContent = "Select user to load shared folders";
-    tbody.innerHTML = "";
-    return;
-  }
 
   hint.textContent = "Loading...";
   tbody.innerHTML = "";
 
   try {
-    const shared = await apiFetch(`/api/shared-folders?username=${encodeURIComponent(username)}`);
-    hint.textContent = shared.length ? "" : "No shared folders";
+    const shared = await apiFetch("/api/shared-folders/all");
+    hint.textContent = shared.length ? "" : "No shared folders in database.";
     tbody.innerHTML = shared.map((s, idx) => `
-      <tr data-idx="${idx}">
+      <tr data-idx="${idx}" data-folder-id="${s.id || ""}" data-folder-path="${escapeHtmlAttr(s.folderPath || "")}">
         <td>${escapeHtml(s.ownerUsername || "")}</td>
+        <td>${escapeHtml(s.userToShareUsername || "")}</td>
         <td>${escapeHtml(s.folderName || "")}</td>
         <td>${escapeHtml(s.folderPath || "")}</td>
+        <td style="text-align:center;">${s.read ? "true" : "false"}</td>
         <td style="text-align:center;">${s.write ? "true" : "false"}</td>
         <td style="text-align:center;">${s.execute ? "true" : "false"}</td>
         <td class="cell-actions">
@@ -780,7 +699,7 @@ async function loadSharedFoldersForSelected() {
       const i = Number(tr?.dataset.idx);
       if (!Number.isFinite(i)) return;
       const row = tbody._data[i];
-      deleteSharedFolder(row?.folderPath);
+      deleteSharedFolder(row?.id, row?.folderPath);
     }));
   } catch (e) {
     hint.textContent = "No data";
@@ -788,14 +707,20 @@ async function loadSharedFoldersForSelected() {
   }
 }
 
-async function deleteSharedFolder(folderPath) {
-  if (!folderPath) return;
+async function deleteSharedFolder(folderId, folderPath) {
+  if (!folderId && !folderPath) return;
   clearBanner();
-  if (!confirm(`Delete shared folder entries for path "${folderPath}"?`)) return;
+  const confirmMsg = folderId 
+    ? `Delete shared folder entry (ID: ${folderId})?`
+    : `Delete shared folder entries for path "${folderPath}"?`;
+  if (!confirm(confirmMsg)) return;
   try {
-    await apiFetch(`/api/shared-folders/delete?folderPath=${encodeURIComponent(folderPath)}`, { method: "DELETE" });
+    const url = folderId
+      ? `/api/shared-folders/all/delete?id=${encodeURIComponent(folderId)}`
+      : `/api/shared-folders/all/delete?folderPath=${encodeURIComponent(folderPath)}`;
+    await apiFetch(url, { method: "DELETE" });
     showBanner("ok", "Shared folder deleted");
-    await loadSharedFoldersForSelected();
+    await loadAllSharedFolders();
   } catch (e) {
     showBanner("err", `Failed to delete shared folder: ${e.message}`);
   }
@@ -882,6 +807,131 @@ async function loadStats() {
 }
 
 /* =========================
+ * ROOT
+ * ========================= */
+
+async function renderRoot() {
+  setView(`
+    <section class="card">
+      <div class="cardhead">
+        <div>
+          <div class="cardtitle">Root</div>
+          <div class="cardsub">FTP server root directory management</div>
+        </div>
+        <div class="toolbar">
+          <button id="refreshRootBtn" class="btn" type="button">Refresh</button>
+        </div>
+      </div>
+      <div class="cardbody">
+        <div class="block">
+          <div class="sectiontitle">Current Root</div>
+          <div class="sectiondesc">Current FTP server root directory and its contents.</div>
+          <div class="sectionbody">
+            <div id="rootInfo" class="hint">Loading...</div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="sectiontitle">Set Root Path</div>
+          <div class="sectiondesc">Change the root directory path. Requires server restart to take effect.</div>
+          <div class="sectionbody">
+            <label class="label" for="rootPathInput">Root path</label>
+            <input id="rootPathInput" class="field" type="text" placeholder="e.g. D:\\ftp-root" style="width: 100%; max-width: 600px;" />
+            <div class="toolbar" style="margin-top: 10px;">
+              <button id="setRootBtn" class="btn btn-primary" type="button">Set root</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="sectiontitle">Create New Root</div>
+          <div class="sectiondesc">Create a new root directory with empty database and required folders.</div>
+          <div class="sectionbody">
+            <label class="label" for="newRootPathInput">New root path</label>
+            <input id="newRootPathInput" class="field" type="text" placeholder="e.g. D:\\new-ftp-root" style="width: 100%; max-width: 600px;" />
+            <div class="muted" style="margin-top: 6px; color: #999;">
+              This will create: ftp.db (empty), /shared folder, /users folder
+            </div>
+            <div class="toolbar" style="margin-top: 10px;">
+              <button id="createRootBtn" class="btn btn-primary" type="button">Create root</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  `);
+
+  qs("#refreshRootBtn").addEventListener("click", loadRootInfo);
+  qs("#setRootBtn").addEventListener("click", setRootPath);
+  qs("#createRootBtn").addEventListener("click", createRoot);
+  await loadRootInfo();
+}
+
+async function loadRootInfo() {
+  clearBanner();
+  const rootInfo = qs("#rootInfo");
+  rootInfo.textContent = "Loading...";
+  try {
+    const info = await apiFetch("/api/root");
+    rootInfo.innerHTML = `
+      <div style="line-height: 1.8;">
+        <div><strong>Root path:</strong> <code>${escapeHtml(info.currentFtpRoot)}</code></div>
+        <div><strong>Database:</strong> <code>${escapeHtml(info.currentDbPath)}</code> ${info.dbExists ? '<span style="color: green;">✓</span>' : '<span style="color: red;">✗</span>'}</div>
+        <div><strong>Shared folder:</strong> <code>${escapeHtml(info.sharedPath)}</code> ${info.sharedExists ? '<span style="color: green;">✓</span>' : '<span style="color: red;">✗</span>'}</div>
+        <div><strong>Users folder:</strong> <code>${escapeHtml(info.usersPath)}</code> ${info.usersExists ? '<span style="color: green;">✓</span>' : '<span style="color: red;">✗</span>'}</div>
+      </div>
+    `;
+    qs("#rootPathInput").value = info.currentFtpRoot;
+  } catch (e) {
+    rootInfo.textContent = "Failed to load root info";
+    showBanner("err", `Failed to load root info: ${e.message}`);
+  }
+}
+
+async function setRootPath() {
+  clearBanner();
+  const rootPath = qs("#rootPathInput").value.trim();
+  if (!rootPath) {
+    showBanner("warn", "Root path is required");
+    return;
+  }
+
+  if (!confirm(`Set root path to:\n${rootPath}\n\nServer restart is required for this change to take effect. Continue?`)) {
+    return;
+  }
+
+  try {
+    const result = await apiFetch("/api/root", { method: "PUT", json: { ftpRoot: rootPath } });
+    showBanner("warn", "Root path saved. Please restart the server for changes to take effect.");
+    await loadRootInfo();
+  } catch (e) {
+    showBanner("err", `Failed to set root path: ${e.message}`);
+  }
+}
+
+async function createRoot() {
+  clearBanner();
+  const rootPath = qs("#newRootPathInput").value.trim();
+  if (!rootPath) {
+    showBanner("warn", "Root path is required");
+    return;
+  }
+
+  if (!confirm(`Create new root at:\n${rootPath}\n\nThis will create:\n- Empty ftp.db with schema\n- /shared folder\n- /users folder\n\nServer restart is required. Continue?`)) {
+    return;
+  }
+
+  try {
+    const result = await apiFetch("/api/root/create", { method: "POST", json: { ftpRoot: rootPath } });
+    showBanner("ok", `Root created successfully at:\n${result.ftpRoot}\n\nPlease restart the server to use the new root.`);
+    qs("#newRootPathInput").value = "";
+    await loadRootInfo();
+  } catch (e) {
+    showBanner("err", `Failed to create root: ${e.message}`);
+  }
+}
+
+/* =========================
  * Helpers
  * ========================= */
 
@@ -903,31 +953,12 @@ function escapeHtmlAttr(s) {
  * ========================= */
 
 function init() {
-  el.tokenInput.value = getToken();
-
-  el.saveTokenBtn.addEventListener("click", async () => {
-    clearBanner();
-    const tok = (el.tokenInput.value || "").trim();
-    if (!tok) {
-      showBanner("warn", "Token is required");
-      return;
-    }
-    try {
-      // Save token on server (DB). After this, old tokens will stop working.
-      await apiFetchNoAuth("/api/admin-token", { method: "PUT", json: { token: tok } });
-      setToken(tok);
-      showBanner("ok", "Token saved (server DB updated)");
-      location.hash = "#/users";
-      route();
-    } catch (e) {
-      showBanner("err", `Failed to save token: ${e.message}`);
-    }
-  });
+  // No token required - auth removed
 
   window.addEventListener("hashchange", route);
   if (!location.hash) location.hash = "#/users";
 
-  // On entry: require token (and if not initialized yet, set it once)
+  // On entry: just verify server is online
   bootstrapAuth().finally(() => route());
 
   // Keep checking server health; if it goes down, show offline overlay and block actions.

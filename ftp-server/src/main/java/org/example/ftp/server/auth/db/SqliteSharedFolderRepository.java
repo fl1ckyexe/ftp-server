@@ -1,5 +1,6 @@
 package org.example.ftp.server.auth.db;
 
+import org.example.ftp.server.auth.Permission;
 import org.example.ftp.server.auth.model.SharedFolder;
 import org.example.ftp.server.db.Db;
 
@@ -16,6 +17,31 @@ public class SqliteSharedFolderRepository {
 
     public SqliteSharedFolderRepository(Db db) {
         this.db = db;
+    }
+
+    public List<SharedFolder> findAll() {
+        String sql = """
+            SELECT id, owner_user_id, user_to_share_id, folder_name, folder_path, r, w, e
+            FROM shared_folders
+            ORDER BY folder_path
+            """;
+
+        List<SharedFolder> out = new ArrayList<>();
+
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+
+            while (rs.next()) {
+                out.add(map(rs));
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        return out;
     }
 
     public List<SharedFolder> findByUserToShare(long userToShareId) {
@@ -134,7 +160,102 @@ public class SqliteSharedFolderRepository {
 
         return false;
     }
+
+    /**
+     * Checks whether the user has the requested permission for an FTP-style absolute path.
+     * Supports subfolders: if /owner/test is shared, it applies to /owner/test/sub.
+     *
+     * @param userToShareId user id that receives the share
+     * @param folderPath FTP-style absolute path ("/owner/path")
+     */
+    public boolean hasPermission(long userToShareId, String folderPath, Permission permission) {
+        String sql = """
+            SELECT r, w, e, LENGTH(folder_path) AS len
+            FROM shared_folders
+            WHERE user_to_share_id = ?
+              AND (folder_path = ? OR (? LIKE folder_path || '/%'))
+            ORDER BY len DESC
+            LIMIT 1
+            """;
+
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+
+            ps.setLong(1, userToShareId);
+            ps.setString(2, folderPath);
+            ps.setString(3, folderPath);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return false;
+                }
+
+                return switch (permission) {
+                    case READ -> rs.getInt("r") == 1;
+                    case WRITE -> rs.getInt("w") == 1;
+                    case EXECUTE -> rs.getInt("e") == 1;
+                };
+            }
+
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
     
+    /**
+     * Находит owner_user_id для указанного пути папки (берет первую найденную запись).
+     * 
+     * @param folderPath Путь папки (например, /admin/testdir)
+     * @return owner_user_id или null, если папка не найдена
+     */
+    public Long findOwnerByFolderPath(String folderPath) {
+        String sql = """
+            SELECT owner_user_id FROM shared_folders
+            WHERE folder_path = ?
+            LIMIT 1
+            """;
+        
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            
+            ps.setString(1, folderPath);
+            
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getLong("owner_user_id");
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Удаляет запись shared folder по ID.
+     * 
+     * @param id ID записи для удаления
+     */
+    public void deleteById(long id) {
+        String sql = "DELETE FROM shared_folders WHERE id = ?";
+        
+        try (Connection c = db.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            
+            ps.setLong(1, id);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     /**
      * Удаляет все записи shared folders для указанного пути папки.
      * Удаляет записи, где folder_path совпадает с указанным путем или является его родительским путём.

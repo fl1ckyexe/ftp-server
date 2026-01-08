@@ -33,6 +33,12 @@ public abstract class AbstractCommandHandler implements FtpCommandHandler {
     }
 
     protected void log(FtpSession session, String commandLine) {
+        String safeCmd = commandLine == null ? "" : commandLine.trim();
+        // Never log plaintext passwords
+        if (safeCmd.regionMatches(true, 0, "PASS", 0, 4)) {
+            safeCmd = "PASS ******";
+        }
+
         String safeUser =
                 session == null
                         ? "unknown-session"
@@ -42,7 +48,7 @@ public abstract class AbstractCommandHandler implements FtpCommandHandler {
                         ? session.getPendingUsername()
                         : "anonymous";
 
-        ServerLogService.log(safeUser + " >> " + commandLine.trim());
+        ServerLogService.log(safeUser + " >> " + safeCmd);
     }
 
     @Override

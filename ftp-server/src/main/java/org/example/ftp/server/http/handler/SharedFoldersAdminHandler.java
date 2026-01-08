@@ -6,15 +6,18 @@ import org.example.ftp.server.auth.db.SqliteSharedFolderRepository;
 import org.example.ftp.server.auth.db.SqliteUserRepository;
 
 import java.io.IOException;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 
-public class SharedFoldersGetHandler implements HttpHandler {
+/**
+ * Admin handler for viewing all shared folders from the database.
+ * No authentication required (admin endpoints are public).
+ */
+public class SharedFoldersAdminHandler implements HttpHandler {
 
     private final SqliteUserRepository userRepo;
     private final SqliteSharedFolderRepository sharedFolderRepo;
 
-    public SharedFoldersGetHandler(
+    public SharedFoldersAdminHandler(
             SqliteUserRepository userRepo,
             SqliteSharedFolderRepository sharedFolderRepo
     ) {
@@ -30,22 +33,7 @@ public class SharedFoldersGetHandler implements HttpHandler {
                 return;
             }
 
-            // Get authenticated username from filter
-            String authenticatedUsername = (String) exchange.getAttribute("authenticatedUsername");
-            if (authenticatedUsername == null) {
-                exchange.sendResponseHeaders(401, -1);
-                return;
-            }
-
-            // Security: user can only view their own shared folders
-            var userOpt = userRepo.findByUsername(authenticatedUsername);
-            if (userOpt.isEmpty()) {
-                exchange.sendResponseHeaders(404, -1);
-                return;
-            }
-
-            long userId = userOpt.get().id();
-            var sharedFolders = sharedFolderRepo.findByUserToShare(userId);
+            var sharedFolders = sharedFolderRepo.findAll();
 
             StringBuilder json = new StringBuilder();
             json.append("[");
@@ -55,19 +43,30 @@ public class SharedFoldersGetHandler implements HttpHandler {
                 if (!first) json.append(",");
                 first = false;
 
+                String ownerUsername = userRepo.findById(folder.ownerUserId())
+                        .map(u -> u.username())
+                        .orElse("unknown");
+                String userToShareUsername = userRepo.findById(folder.userToShareId())
+                        .map(u -> u.username())
+                        .orElse("unknown");
+
                 json.append("""
                     {
+                      "id":%d,
                       "folderName":"%s",
                       "folderPath":"%s",
                       "ownerUsername":"%s",
+                      "userToShareUsername":"%s",
                       "read":%s,
                       "write":%s,
                       "execute":%s
                     }
                     """.formatted(
+                        folder.id(),
                         escapeJson(folder.folderName()),
                         escapeJson(folder.folderPath()),
-                        escapeJson(getOwnerUsername(folder.ownerUserId())),
+                        escapeJson(ownerUsername),
+                        escapeJson(userToShareUsername),
                         folder.read(),
                         folder.write(),
                         folder.execute()
@@ -89,30 +88,6 @@ public class SharedFoldersGetHandler implements HttpHandler {
             exchange.getResponseBody().write(msg);
         } finally {
             exchange.close();
-        }
-    }
-
-    private String getOwnerUsername(long ownerUserId) {
-        return userRepo.findById(ownerUserId)
-                .map(u -> u.username())
-                .orElse("unknown");
-    }
-
-    private String extractQueryParam(String query, String key) {
-        if (query == null) return null;
-        for (String part : query.split("&")) {
-            String[] kv = part.split("=", 2);
-            if (kv.length == 2 && kv[0].equals(key)) return kv[1];
-        }
-        return null;
-    }
-
-    private String urlDecode(String s) {
-        if (s == null) return null;
-        try {
-            return URLDecoder.decode(s, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            return s;
         }
     }
 

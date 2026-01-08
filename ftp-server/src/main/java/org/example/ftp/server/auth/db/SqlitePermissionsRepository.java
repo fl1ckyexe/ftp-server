@@ -32,14 +32,22 @@ public class SqlitePermissionsRepository {
 
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
+                    // No permissions row found - this means user doesn't have permissions set
+                    // This should not happen if PassCommandHandler creates permissions on login
                     return false;
                 }
 
-                return switch (permission) {
-                    case READ -> rs.getInt("r") == 1;
-                    case WRITE -> rs.getInt("w") == 1;
-                    case EXECUTE -> rs.getInt("e") == 1;
+                int r = rs.getInt("r");
+                int w = rs.getInt("w");
+                int e = rs.getInt("e");
+                
+                boolean result = switch (permission) {
+                    case READ -> r == 1;
+                    case WRITE -> w == 1;
+                    case EXECUTE -> e == 1;
                 };
+                
+                return result;
             }
 
         } catch (SQLException exe) {

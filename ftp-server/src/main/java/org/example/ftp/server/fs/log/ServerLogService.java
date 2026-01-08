@@ -1,23 +1,36 @@
 package org.example.ftp.server.fs.log;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedDeque;
 
 public class ServerLogService {
 
-    private static final List<String> LOGS = new ArrayList<>();
+    private static final ConcurrentLinkedDeque<String> LOGS = new ConcurrentLinkedDeque<>();
 
-    public static synchronized void log(String message) {
-        String line = "[" + LocalDateTime.now() + "] " + message;
+    // Tunables (system properties):
+    // -Dftp.log.max=2000
+    // -Dftp.log.console=true/false
+    private static final int MAX_LOGS = Integer.getInteger("ftp.log.max", 2000);
+    private static final boolean CONSOLE = Boolean.parseBoolean(System.getProperty("ftp.log.console", "true"));
 
-        System.out.println(line);
+    public static void log(String message) {
+        String line = "[" + Instant.now() + "] " + message;
 
-        LOGS.add(line);
+        if (CONSOLE) {
+            System.out.println(line);
+        }
+
+        LOGS.addLast(line);
+        // best-effort ring buffer trim
+        while (LOGS.size() > MAX_LOGS) {
+            LOGS.pollFirst();
+        }
 
     }
 
-    public static synchronized List<String> getLogs() {
-        return new ArrayList<>(LOGS); // копия!
+    public static List<String> getLogs() {
+        return new ArrayList<>(LOGS); // copy snapshot
     }
 }

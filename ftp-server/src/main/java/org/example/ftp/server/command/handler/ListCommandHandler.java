@@ -4,15 +4,18 @@ import org.example.ftp.common.protocol.FtpResponse;
 import org.example.ftp.common.protocol.Responses;
 import org.example.ftp.server.auth.Permission;
 import org.example.ftp.server.fs.ListFormatter;
+import org.example.ftp.server.fs.AccessControl;
 import org.example.ftp.server.fs.PathResolver;
 import org.example.ftp.server.session.FtpSession;
 
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.stream.Stream;
 
 public class ListCommandHandler extends AbstractCommandHandler {
 
@@ -40,15 +43,7 @@ public class ListCommandHandler extends AbstractCommandHandler {
             return Responses.accessDenied();
         }
 
-        Path home = session.getHomeDirectory().normalize().toAbsolutePath();
-        Path shared = session.getSharedDirectory().normalize().toAbsolutePath();
-        Path resolved = dir.normalize().toAbsolutePath();
-        boolean isInHomeDirectory = resolved.startsWith(home);
-        boolean isInSharedDirectory = resolved.startsWith(shared);
-
-        // Если путь находится в home directory, всегда разрешаем (не проверяем глобальные права)
-        // Если путь находится в /shared, проверяем глобальное право READ
-        if (!isInHomeDirectory && isInSharedDirectory && !session.getPermissionService().has(session.getUsername(), Permission.READ)) {
+        if (!AccessControl.can(session, dir, Permission.READ)) {
             return Responses.permissionDenied();
         }
 
@@ -59,60 +54,67 @@ public class ListCommandHandler extends AbstractCommandHandler {
                         true
                 )
         ) {
-            Path requested = resolved;
-            Path currentDir = session.getCurrentDirectory().normalize().toAbsolutePath();
-            
-            System.out.println("LIST command - requested path: " + requested);
-            System.out.println("LIST command - current directory: " + currentDir);
-            System.out.println("LIST command - home path: " + home);
-            System.out.println("LIST command - shared path: " + shared);
-            System.out.println("LIST command - argument was: " + argument);
+            Path home = session.getHomeDirectory().normalize().toAbsolutePath();
+            Path shared = session.getSharedDirectory().normalize().toAbsolutePath();
+            Path requested = dir.normalize().toAbsolutePath();
 
-            // Если запрашивается home directory, показываем реальное содержимое home directory
+            // Если запрашивается home directory, показываем только реальное содержимое
+            // НЕ показываем виртуальные папки владельцев - они должны быть только в разделе user-to-user в UI
             if (requested.equals(home)) {
-                System.out.println("LIST: Showing home directory contents");
-                // Показываем только реальные файлы и папки из home directory
-                Files.list(dir)
-                        .peek(path -> System.out.println("LIST: Adding file: " + path.getFileName()))
+                // Показываем только реальные файлы и папки из home directory пользователя
+                // Фильтруем, чтобы не показывать папки других пользователей
+                Path ftpRoot = session.getFtpRoot().normalize().toAbsolutePath();
+                Path usersDir = ftpRoot.resolve("users").normalize().toAbsolutePath();
+                String currentUsername = session.getUsername();
+                
+                try (Stream<Path> stream = Files.list(dir)) {
+                    stream
+                        .filter(p -> {
+                            Path normalized = p.normalize().toAbsolutePath();
+                            
+                            // Показываем только файлы/папки, которые находятся строго в home directory пользователя
+                            // Исключаем папки других пользователей
+                            if (normalized.startsWith(usersDir)) {
+                                Path relative = usersDir.relativize(normalized);
+                                if (relative.getNameCount() > 0) {
+                                    String firstComponent = relative.getName(0).toString();
+                                    // Показываем только если это папка текущего пользователя или его подпапка
+                                    if (!firstComponent.equals(currentUsername)) {
+                                        // Это папка другого пользователя - не показываем
+                                        return false;
+                                    }
+                                }
+                            }
+                            
+                            // Показываем только если путь находится в home directory пользователя
+                            return normalized.startsWith(home);
+                        })
                         .map(ListFormatter::format)
-                        .peek(formatted -> System.out.println("LIST: Formatted: " + formatted))
                         .forEach(out::println);
+                }
                 out.flush();
-                System.out.println("LIST: Home directory listing sent");
             }
             // Если запрашивается /shared, показываем физические файлы и папки
             // (глобальное право READ уже проверено выше, поэтому здесь мы можем показывать всё)
             else if (requested.equals(shared)) {
-                System.out.println("LIST: Showing shared directory contents");
-                
-                // Показываем все физические файлы и папки из /shared
-                // (пользователь уже имеет глобальное право READ, так как мы прошли проверку выше)
-                Files.list(dir)
-                        .peek(path -> System.out.println("LIST: Adding file: " + path.getFileName()))
-                        .map(ListFormatter::format)
-                        .forEach(out::println);
-                
+                try (Stream<Path> stream = Files.list(dir)) {
+                    stream.map(ListFormatter::format).forEach(out::println);
+                }
                 out.flush();
-                System.out.println("LIST: Shared directory listing sent");
             }
             // Для всех остальных директорий показываем обычный список
+            // Если это папка другого пользователя, AccessControl уже проверил доступ через shared_folders
+            // Поэтому показываем все содержимое (доступ уже разрешен)
             else {
-                System.out.println("LIST: Showing regular directory listing for: " + requested);
-                long count = Files.list(dir)
-                        .peek(path -> System.out.println("LIST: Adding file: " + path.getFileName()))
-                        .map(ListFormatter::format)
-                        .peek(formatted -> System.out.println("LIST: Formatted: " + formatted))
-                        .peek(out::println)
-                        .count();
-                System.out.println("LIST: Sent " + count + " files");
+                try (Stream<Path> stream = Files.list(dir)) {
+                    stream.map(ListFormatter::format).forEach(out::println);
+                }
                 out.flush();
             }
-            
-            System.out.println("LIST: Listing complete, closing data connection");
 
+        } catch (SocketTimeoutException e) {
+            return Responses.connectionClosedTransferAborted();
         } catch (Exception e) {
-            System.err.println("LIST: Exception occurred: " + e.getMessage());
-            e.printStackTrace();
             return Responses.connectionClosedTransferAborted();
         } finally {
             try {

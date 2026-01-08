@@ -16,10 +16,10 @@ public class CommandDispatcher {
     private final Map<String, AbstractCommandHandler> handlers = new HashMap<>();
 
     private final VisitorPipeline visitorPipeline = new VisitorPipeline(
-            List.of(
-                    new LoggingVisitor(),
-                    new MetricsVisitor()
-            )
+            // Metrics are always on; debug logging is controlled by -Dftp.debug=true
+            Boolean.getBoolean("ftp.debug")
+                    ? List.of(new LoggingVisitor(), new MetricsVisitor())
+                    : List.of(new MetricsVisitor())
     );
 
     public CommandDispatcher() {

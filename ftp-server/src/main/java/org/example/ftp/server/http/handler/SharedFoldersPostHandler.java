@@ -29,6 +29,13 @@ public class SharedFoldersPostHandler implements HttpHandler {
             return;
         }
 
+        // Get authenticated username from filter
+        String authenticatedUsername = (String) ex.getAttribute("authenticatedUsername");
+        if (authenticatedUsername == null) {
+            ex.sendResponseHeaders(401, -1);
+            return;
+        }
+
         String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
 
         String ownerUsername = extract(body, "owner");
@@ -41,6 +48,12 @@ public class SharedFoldersPostHandler implements HttpHandler {
         if (ownerUsername == null || userToShareUsername == null || 
             folderName == null || folderPath == null) {
             ex.sendResponseHeaders(400, -1);
+            return;
+        }
+
+        // Security: user can only share their own folders
+        if (!authenticatedUsername.equals(ownerUsername)) {
+            ex.sendResponseHeaders(403, -1); // Forbidden
             return;
         }
 

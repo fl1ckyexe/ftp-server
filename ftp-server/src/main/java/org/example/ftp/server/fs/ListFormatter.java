@@ -37,4 +37,17 @@ public final class ListFormatter {
             return path.getFileName().toString();
         }
     }
+
+    /**
+     * Formats a virtual directory (doesn't exist on disk, e.g., shared folders).
+     */
+    public static String formatDirectory(String name) {
+        String date = DATE.format(Instant.now());
+        return String.format(
+                "drwxr-xr-x 1 user group %8d %s %s",
+                0,
+                date,
+                name
+        );
+    }
 }

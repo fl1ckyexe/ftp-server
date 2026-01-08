@@ -3,8 +3,8 @@ package org.example.ftp.server.command.handler;
 import org.example.ftp.common.protocol.FtpResponse;
 import org.example.ftp.common.protocol.Responses;
 import org.example.ftp.server.auth.Permission;
+import org.example.ftp.server.fs.AccessControl;
 import org.example.ftp.server.fs.PathResolver;
-import org.example.ftp.server.fs.log.ServerLogService;
 import org.example.ftp.server.session.FtpSession;
 import org.example.ftp.server.transfer.RateLimiter;
 import org.example.ftp.server.transfer.ThrottledInputStream;
@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -46,16 +47,7 @@ public class StorCommandHandler extends AbstractCommandHandler {
             return Responses.accessDenied();
         }
 
-        // Проверяем, находится ли путь в home directory пользователя
-        Path home = session.getHomeDirectory().normalize().toAbsolutePath();
-        Path shared = session.getSharedDirectory().normalize().toAbsolutePath();
-        Path resolved = target.normalize().toAbsolutePath();
-        boolean isInHomeDirectory = resolved.startsWith(home);
-        boolean isInSharedDirectory = resolved.startsWith(shared);
-
-        // Если путь находится в home directory, всегда разрешаем (не проверяем глобальные права)
-        // Если путь находится в /shared, проверяем глобальное право WRITE
-        if (!isInHomeDirectory && isInSharedDirectory && !session.getPermissionService().has(session.getUsername(), Permission.WRITE)) {
+        if (!AccessControl.can(session, target, Permission.WRITE)) {
             return Responses.permissionDenied();
         }
 
@@ -67,7 +59,6 @@ public class StorCommandHandler extends AbstractCommandHandler {
             // Отправляем ответ 150 ДО вызова accept(), чтобы клиент знал, что нужно подключиться
             session.sendResponse(Responses.ok(150, "Opening data connection."));
         } catch (IOException e) {
-            ServerLogService.log("[STOR] ERROR before transfer: " + e.getMessage());
             return Responses.connectionClosedTransferAborted();
         }
         
@@ -77,6 +68,7 @@ public class StorCommandHandler extends AbstractCommandHandler {
 
         boolean transferCompleted = false;
         boolean wasAborted = false;
+        boolean eofReceived = false; // Отслеживаем, был ли получен EOF (успешное завершение передачи)
         OutputStream fileOutputStream = null;
         Socket activeDataConn = null;
         long bytes = 0;
@@ -89,7 +81,6 @@ public class StorCommandHandler extends AbstractCommandHandler {
             activeDataConn = dataConnection;
             session.setActiveDataConnection(dataConnection);
 
-            ServerLogService.log("[STOR] Start upload user=" + session.getUsername() + " file=" + argument);
             // Создаем поток файла отдельно, чтобы иметь контроль над его закрытием
             fileOutputStream = Files.newOutputStream(
                     target,
@@ -119,8 +110,8 @@ public class StorCommandHandler extends AbstractCommandHandler {
                         bytesRead = in.read(buffer);
                         if (bytesRead == -1) {
                             // EOF means client finished sending. If it was a cancel/abort, we'll also see closed/reset or abort flag.
+                            eofReceived = true; // Отметим, что EOF был получен
                             if (session.isTransferAbortRequested()) {
-                                System.out.println("[STOR] EOF received but ABOR was requested, aborting transfer");
                                 wasAborted = true;
                             }
                             break;
@@ -128,12 +119,10 @@ public class StorCommandHandler extends AbstractCommandHandler {
                     } catch (java.net.SocketTimeoutException e) {
                         // Таймаут - проверяем состояние соединения
                         if (session.isTransferAbortRequested()) {
-                            System.out.println("[STOR] Transfer abort requested (ABOR) during timeout, aborting transfer");
                             wasAborted = true;
                             break;
                         }
                         if (dataConnection.isClosed() || !dataConnection.isConnected()) {
-                            System.out.println("[STOR] Data connection closed by client (timeout), aborting transfer");
                             wasAborted = true;
                             break;
                         }
@@ -153,7 +142,6 @@ public class StorCommandHandler extends AbstractCommandHandler {
                     (msg != null && (msg.contains("closed") || msg.contains("reset") || msg.contains("Connection reset")))) {
                     wasAborted = true;
                 } else {
-                    ServerLogService.log("[STOR] ERROR during transfer: " + msg);
                     throw e; // Другая ошибка - пробрасываем дальше
                 }
             }
@@ -168,11 +156,33 @@ public class StorCommandHandler extends AbstractCommandHandler {
                 transferCompleted = true; // Передача успешно завершена
                 session.getStatsService().onUpload(session.getUsername(), bytes);
             }
-        } catch (IOException e) {
-            // При любой ошибке помечаем как прерванную
-            ServerLogService.log("[STOR] ERROR during transfer: " + e.getMessage());
+        } catch (SocketTimeoutException e) {
+            // Client didn't open data connection in time
             wasAborted = true;
             transferCompleted = false;
+        } catch (IOException e) {
+            // Если EOF был получен (передача завершена успешно), игнорируем ошибки закрытия соединения
+            if (eofReceived && transferCompleted) {
+                // Передача уже завершена успешно, ошибка при закрытии соединения не важна
+                // Просто игнорируем ошибку
+            } else {
+                // При ошибке до завершения передачи помечаем как прерванную
+                String msg = e.getMessage();
+                // Игнорируем ошибки закрытия соединения, если EOF был получен
+                if (msg != null && (msg.contains("closed") || msg.contains("reset") || msg.contains("Connection reset") || msg.contains("Broken pipe"))) {
+                    if (eofReceived) {
+                        // EOF был получен, это нормальное закрытие соединения после завершения передачи
+                        // Не помечаем как ошибку
+                    } else {
+                        // EOF не был получен, это реальная ошибка
+                        wasAborted = true;
+                        transferCompleted = false;
+                    }
+                } else {
+                    wasAborted = true;
+                    transferCompleted = false;
+                }
+            }
         } finally {
             // Clear active data connection reference
             if (activeDataConn != null) {
@@ -185,7 +195,7 @@ public class StorCommandHandler extends AbstractCommandHandler {
                 try {
                     fileOutputStream.close();
                 } catch (IOException e) {
-                    ServerLogService.log("[STOR] ERROR closing file: " + e.getMessage());
+                    // Ignore
                 }
             }
             
@@ -201,11 +211,9 @@ public class StorCommandHandler extends AbstractCommandHandler {
         }
 
         if (wasAborted || !transferCompleted) {
-            ServerLogService.log("[STOR] Aborted user=" + session.getUsername() + " file=" + argument + " bytes=" + bytes);
             return Responses.connectionClosedTransferAborted();
         }
 
-        ServerLogService.log("[STOR] Complete user=" + session.getUsername() + " file=" + argument + " bytes=" + bytes);
         return Responses.transferComplete();
     }
 
@@ -227,7 +235,6 @@ public class StorCommandHandler extends AbstractCommandHandler {
                     return;
                 } catch (IOException e) {
                     if (attempt == 10) {
-                        ServerLogService.log("[STOR] ERROR: Could not delete partial file: " + target + " (" + e.getMessage() + ")");
                         return;
                     }
                     try {

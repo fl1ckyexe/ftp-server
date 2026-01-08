@@ -1,7 +1,6 @@
 package org.example.ftp.server.fs;
 
 import org.example.ftp.server.session.FtpSession;
-import org.example.ftp.server.util.DebugLog;
 
 import java.nio.file.Path;
 
@@ -10,16 +9,10 @@ public final class PathResolver {
     private PathResolver() {}
 
     public static Path resolve(FtpSession session, String ftpPath) {
-        DebugLog.d("PathResolver.resolve() - ftpPath: " + ftpPath);
-        DebugLog.d("PathResolver.resolve() - currentDirectory: " + session.getCurrentDirectory());
-        DebugLog.d("PathResolver.resolve() - homeDirectory: " + session.getHomeDirectory());
-        DebugLog.d("PathResolver.resolve() - username: " + session.getUsername());
-
         Path base;
 
         if (ftpPath == null || ftpPath.isBlank()) {
             base = session.getCurrentDirectory();
-            DebugLog.d("PathResolver.resolve() - Using current directory: " + base);
         }
         else if (ftpPath.startsWith("/")) {
             String normalized = ftpPath.replace('\\', '/');
@@ -43,7 +36,6 @@ public final class PathResolver {
                     // Например, /admin/admin или /admin/shared - это недопустимые пути
                     if (subPath.equals("admin") || subPath.equals("shared") || 
                         subPath.startsWith("admin/") || subPath.startsWith("shared/")) {
-                        DebugLog.d("PathResolver.resolve() - Attempting to access virtual folder: " + normalized + ", rejecting");
                         throw new SecurityException("Cannot access virtual folders: " + normalized);
                     }
                     
@@ -56,12 +48,9 @@ public final class PathResolver {
                     
                     // Если это не имя текущего пользователя, проверяем доступ через shared folders
                     if (!ownerUsername.isEmpty() && !ownerUsername.equals(session.getUsername())) {
-                        DebugLog.d("PathResolver.resolve() - Checking shared folder access for path: " + normalized);
-                        
                         // Получаем ID текущего пользователя
                         var currentUserOpt = session.getUserRepository().findByUsername(session.getUsername());
                         if (currentUserOpt.isEmpty()) {
-                            DebugLog.d("PathResolver.resolve() - Current user not found, rejecting");
                             throw new SecurityException("User not found");
                         }
                         
@@ -69,8 +58,6 @@ public final class PathResolver {
                         
                         // Проверяем доступ через shared folders
                         if (session.getSharedFolderRepository().hasAccess(currentUserId, normalized)) {
-                            DebugLog.d("PathResolver.resolve() - Shared folder access granted for: " + normalized);
-                            
                             // Разрешаем путь: преобразуем /admin/lasttest в путь на диске
                             // Формат: /owner/path -> ftpRoot/users/owner/path
                             Path ownerHome = session.getFtpRoot().resolve("users").resolve(ownerUsername);
@@ -80,15 +67,12 @@ public final class PathResolver {
                             } else {
                                 base = ownerHome;
                             }
-                            DebugLog.d("PathResolver.resolve() - Resolved shared folder path: " + base);
                         } else {
-                            DebugLog.d("PathResolver.resolve() - No shared folder access for: " + normalized + ", rejecting");
                             throw new SecurityException("Access denied: " + normalized);
                         }
                     } else {
                         // Путь начинается с имени текущего пользователя, но мы уже обработали это выше
                         // Это не должно случиться, но на всякий случай
-                        DebugLog.d("PathResolver.resolve() - Invalid path format: " + normalized + ", rejecting");
                         throw new SecurityException("Invalid path format: " + normalized);
                     }
                 }
@@ -112,16 +96,14 @@ public final class PathResolver {
             } else if (normalized.equals(session.getUsername()) && isInHomeDirectory) {
                 // Если пытаемся перейти в папку с именем пользователя, находясь уже в home directory,
                 // это не имеет смысла - остаемся в home directory
-                DebugLog.d("PathResolver.resolve() - Relative path equals username and in home, staying in home");
                 base = session.getHomeDirectory();
             } else {
-                DebugLog.d("PathResolver.resolve() - Resolving relative path: " + ftpPath + " from current: " + currentDir);
+                // Разрешаем как обычный относительный путь
                 base = session.getCurrentDirectory().resolve(ftpPath);
             }
         }
 
         Path normalized = base.normalize().toAbsolutePath();
-        System.out.println("PathResolver.resolve() - Final resolved path: " + normalized);
 
         Path home = session.getHomeDirectory().normalize().toAbsolutePath();
         Path shared = session.getSharedDirectory().normalize().toAbsolutePath();
@@ -131,6 +113,45 @@ public final class PathResolver {
         // Разрешаем доступ к home directory, shared directory, и папкам других пользователей (shared folders)
         if (!normalized.startsWith(home) && !normalized.startsWith(shared) && !normalized.startsWith(usersDir)) {
             throw new SecurityException("Access outside allowed roots");
+        }
+
+        // Important: when user is already inside other user's directory, relative paths like ".."
+        // must not allow escaping outside of granted shared folder roots.
+        if (normalized.startsWith(usersDir) && !normalized.startsWith(home)) {
+            String rel = usersDir.relativize(normalized).toString().replace('\\', '/');
+            String ftpStyle = "/" + rel;
+
+            var currentUserOpt = session.getUserRepository().findByUsername(session.getUsername());
+            if (currentUserOpt.isEmpty()) {
+                throw new SecurityException("User not found");
+            }
+            long currentUserId = currentUserOpt.get().id();
+
+            // Проверяем доступ через shared_folders
+            boolean hasAccess = session.getSharedFolderRepository().hasAccess(currentUserId, ftpStyle);
+            
+            // Если нет прямого доступа, проверяем, не является ли это home directory другого пользователя
+            // и есть ли у текущего пользователя хотя бы одна поделенная папка от этого владельца
+            if (!hasAccess) {
+                String[] parts = rel.split("/");
+                if (parts.length > 0 && !parts[0].equals(session.getUsername())) {
+                    String ownerUsername = parts[0];
+                    // Проверяем, есть ли у текущего пользователя хотя бы одна поделенная папка от этого владельца
+                    var sharedFolders = session.getSharedFolderRepository().findByUserToShare(currentUserId);
+                    for (var sf : sharedFolders) {
+                        var ownerOpt = session.getUserRepository().findById(sf.ownerUserId());
+                        if (ownerOpt.isPresent() && ownerOpt.get().username().equals(ownerUsername)) {
+                            // Нашли поделенную папку от этого владельца - разрешаем доступ к его home directory
+                            hasAccess = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            if (!hasAccess) {
+                throw new SecurityException("Access denied: " + ftpStyle);
+            }
         }
 
         return normalized;

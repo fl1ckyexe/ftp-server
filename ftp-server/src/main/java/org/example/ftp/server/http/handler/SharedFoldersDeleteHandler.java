@@ -3,6 +3,7 @@ package org.example.ftp.server.http.handler;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import org.example.ftp.server.auth.db.SqliteSharedFolderRepository;
+import org.example.ftp.server.auth.db.SqliteUserRepository;
 
 import java.io.IOException;
 import java.net.URLDecoder;
@@ -11,8 +12,12 @@ import java.nio.charset.StandardCharsets;
 public class SharedFoldersDeleteHandler implements HttpHandler {
 
     private final SqliteSharedFolderRepository sharedFolderRepo;
+    private final SqliteUserRepository userRepo;
 
-    public SharedFoldersDeleteHandler(SqliteSharedFolderRepository sharedFolderRepo) {
+    public SharedFoldersDeleteHandler(
+            SqliteUserRepository userRepo,
+            SqliteSharedFolderRepository sharedFolderRepo) {
+        this.userRepo = userRepo;
         this.sharedFolderRepo = sharedFolderRepo;
     }
 
@@ -24,12 +29,54 @@ public class SharedFoldersDeleteHandler implements HttpHandler {
                 return;
             }
 
+            // Get authenticated username from filter
+            String authenticatedUsername = (String) exchange.getAttribute("authenticatedUsername");
+            if (authenticatedUsername == null) {
+                exchange.sendResponseHeaders(401, -1);
+                return;
+            }
+
+            var authenticatedUserOpt = userRepo.findByUsername(authenticatedUsername);
+            if (authenticatedUserOpt.isEmpty()) {
+                exchange.sendResponseHeaders(404, -1);
+                return;
+            }
+
+            long authenticatedUserId = authenticatedUserOpt.get().id();
+
             String query = exchange.getRequestURI().getQuery();
             String rawFolderPath = extractQueryParam(query, "folderPath");
             String folderPath = urlDecode(rawFolderPath);
 
             if (folderPath == null || folderPath.isBlank()) {
                 exchange.sendResponseHeaders(400, -1);
+                return;
+            }
+
+            // Security: check that authenticated user is the owner of the folder
+            Long ownerId = sharedFolderRepo.findOwnerByFolderPath(folderPath);
+            if (ownerId == null) {
+                // If no shared folder exists, try to verify ownership by path format
+                // Path format: /username/path, so owner is the first segment after /
+                String[] pathParts = folderPath.split("/");
+                if (pathParts.length < 2) {
+                    exchange.sendResponseHeaders(400, -1);
+                    return;
+                }
+                String ownerUsername = pathParts[1];
+                
+                var ownerOpt = userRepo.findByUsername(ownerUsername);
+                if (ownerOpt.isEmpty()) {
+                    exchange.sendResponseHeaders(404, -1);
+                    return;
+                }
+                
+                ownerId = ownerOpt.get().id();
+            }
+            
+            // User can only delete shares for their own folders
+            if (authenticatedUserId != ownerId) {
+                exchange.sendResponseHeaders(403, -1); // Forbidden
                 return;
             }
 

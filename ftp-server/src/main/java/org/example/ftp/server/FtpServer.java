@@ -15,6 +15,7 @@ import org.example.ftp.server.http.AdminHttpServer;
 import org.example.ftp.server.http.AdminTokenService;
 import org.example.ftp.server.session.ActiveSessionRegistry;
 import org.example.ftp.server.session.FtpSession;
+import org.example.ftp.server.session.FtpSessionBuilder;
 import org.example.ftp.server.stats.StatsService;
 import org.example.ftp.server.stats.db.SqliteStatsRepository;
 import org.example.ftp.server.transfer.RateLimiter;
@@ -25,6 +26,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.awt.Desktop;
+import java.net.SocketException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
@@ -100,6 +102,10 @@ public class FtpServer {
         this.userRepo = userRepo;
         this.sharedFolderRepo = new SqliteSharedFolderRepository(db);
 
+        // Helpful to debug "IDE works but packaged app doesn't" — often different ftp-root/db
+        System.out.println("Resolved ftp-root: " + ftpRoot.toAbsolutePath().normalize());
+        System.out.println("Resolved ftp-db  : " + ftpRoot.resolve("ftp.db").toAbsolutePath().normalize());
+
         AdminHttpServer.start(
                 this.authService,
                 this.connectionLimiter,
@@ -115,6 +121,7 @@ public class FtpServer {
                 folderPermRepo,
                 this.sharedFolderRepo,
                 settingsRepo,
+                ftpRoot,
                 this.adminPort
         );
 
@@ -313,24 +320,45 @@ public class FtpServer {
             out.print("220 FTP Server Ready\r\n");
             out.flush();
 
-            session = new FtpSession(
-                    out,
-                    ftpRoot,
-                    authService,
-                    permissionService,
-                    statsService,
-                    connectionLimiter,
-                    globalUploadRateLimiter,
-                    globalDownloadRateLimiter,
-                    userRepo,
-                    folderRepo,
-                    folderPermRepo,
-                    sharedFolderRepo
-            );
+            session = FtpSessionBuilder.create()
+                    .writer(out)
+                    .ftpRoot(ftpRoot)
+                    .authService(authService)
+                    .permissionService(permissionService)
+                    .statsService(statsService)
+                    .connectionLimiter(connectionLimiter)
+                    .globalUploadRateLimiter(globalUploadRateLimiter)
+                    .globalDownloadRateLimiter(globalDownloadRateLimiter)
+                    .userRepository(userRepo)
+                    .folderRepository(folderRepo)
+                    .folderPermissionRepository(folderPermRepo)
+                    .sharedFolderRepository(sharedFolderRepo)
+                    .build();
 
-            String line;
-            while ((line = in.readLine()) != null) {
-                session.handle(line);
+            while (true) {
+                final String line;
+                try {
+                    line = in.readLine();
+                } catch (SocketException se) {
+                    // Normal scenario: client closed the connection abruptly (Windows message: "host program closed...")
+                    if (isClientDisconnect(se)) {
+                        break;
+                    }
+                    throw se;
+                }
+
+                if (line == null) {
+                    // EOF -> client closed connection
+                    break;
+                }
+
+                try {
+                    session.handle(line);
+                } catch (Throwable t) {
+                    // Do not kill the whole server; just end this client session.
+                    t.printStackTrace();
+                    break;
+                }
 
                 if (session.isCloseRequested()) {
                     break;
@@ -338,13 +366,30 @@ public class FtpServer {
             }
 
         } catch (IOException e) {
-            e.printStackTrace();
+            if (!isClientDisconnect(e)) {
+                e.printStackTrace();
+            }
         } finally {
             sessionRegistry.unregister(socket);
             if (session != null && session.isAuthenticated()) {
                 connectionLimiter.release(session.getUsername());
             }
         }
+    }
+
+    private static boolean isClientDisconnect(IOException e) {
+        if (e == null) return false;
+        if (e instanceof SocketException) return true;
+        String msg = e.getMessage();
+        if (msg == null) return false;
+        String m = msg.toLowerCase();
+        return m.contains("connection reset")
+                || m.contains("socket closed")
+                || m.contains("forcibly closed")
+                || m.contains("was aborted")
+                || m.contains("разорвала")
+                || m.contains("принудительно")
+                || m.contains("сброшено");
     }
 
     public AuthService getAuthService() {

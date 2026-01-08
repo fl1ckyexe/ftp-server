@@ -2,7 +2,6 @@ package org.example.ftp.server.session.memento;
 
 import org.example.ftp.server.session.SessionState;
 
-import java.net.ServerSocket;
 import java.nio.file.Path;
 
 public class SessionMemento {
@@ -13,7 +12,6 @@ public class SessionMemento {
     private final boolean authenticated;
     private final Path currentDirectory;
     private final Path homeDirectory;
-    private final ServerSocket passiveDataSocket;
 
     public SessionMemento(
             SessionState state,
@@ -21,8 +19,7 @@ public class SessionMemento {
             String username,
             boolean authenticated,
             Path currentDirectory,
-            Path homeDirectory,
-            ServerSocket passiveDataSocket
+            Path homeDirectory
     ) {
         this.state = state;
         this.pendingUsername = pendingUsername;
@@ -30,7 +27,6 @@ public class SessionMemento {
         this.authenticated = authenticated;
         this.currentDirectory = currentDirectory;
         this.homeDirectory = homeDirectory;
-        this.passiveDataSocket = passiveDataSocket;
     }
 
     public SessionState getState() {
@@ -56,11 +52,6 @@ public class SessionMemento {
     public Path getHomeDirectory() {
         return homeDirectory;
     }
-
-    public ServerSocket getPassiveDataSocket() {
-        return passiveDataSocket;
-    }
-
-
+    
 }
 

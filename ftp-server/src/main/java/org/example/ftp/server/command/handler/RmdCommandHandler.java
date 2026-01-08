@@ -2,6 +2,7 @@ package org.example.ftp.server.command.handler;
 
 import org.example.ftp.common.protocol.FtpResponse;
 import org.example.ftp.server.auth.Permission;
+import org.example.ftp.server.fs.AccessControl;
 import org.example.ftp.server.fs.PathResolver;
 import org.example.ftp.server.session.FtpSession;
 
@@ -34,14 +35,7 @@ public class RmdCommandHandler extends AbstractCommandHandler {
             return FtpResponse.error(550, "Access denied.");
         }
 
-        // Проверяем, находится ли путь в home directory пользователя
-        Path home = session.getHomeDirectory().normalize().toAbsolutePath();
-        Path resolved = target.normalize().toAbsolutePath();
-        boolean isInHomeDirectory = resolved.startsWith(home);
-
-        // Если путь находится в home directory, всегда разрешаем (не проверяем глобальные права)
-        // Если путь находится вне home directory (например, /shared), проверяем глобальное право EXECUTE (для удаления)
-        if (!isInHomeDirectory && !session.getPermissionService().has(session.getUsername(), Permission.EXECUTE)) {
+        if (!AccessControl.can(session, target, Permission.EXECUTE)) {
             return FtpResponse.error(550, "Permission denied.");
         }
 

@@ -45,20 +45,33 @@ public class LimitsHandler implements HttpHandler {
 
 
     private void handleGet(HttpExchange exchange) throws IOException {
+        // Get values from DB (source of truth), fallback to current in-memory values
+        var settings = settingsRepo.get();
+        int maxConn = settings != null ? settings.globalMaxConnections() : connectionLimiter.getMaxConnections();
+        
+        // Get limits from DB
+        long uploadLimit = settings != null ? settings.globalUploadLimit() : uploadRateLimiter.getLimit();
+        long downloadLimit = settings != null ? settings.globalDownloadLimit() : downloadRateLimiter.getLimit();
+        long rateLimit = settings != null ? settings.globalRateLimit() : downloadRateLimiter.getLimit();
+        
+        // If limits equal default (200000), return null to show empty in UI (user hasn't customized them)
+        // This allows UI to distinguish between "not set" (empty field) and "set to 200000"
+        Long uploadLimitJson = uploadLimit == 200000 ? null : uploadLimit;
+        Long downloadLimitJson = downloadLimit == 200000 ? null : downloadLimit;
 
         String json = String.format(
                 """
                 {
                   "globalMaxConnections": %d,
                   "globalRateLimit": %d,
-                  "globalUploadLimit": %d,
-                  "globalDownloadLimit": %d
+                  "globalUploadLimit": %s,
+                  "globalDownloadLimit": %s
                 }
                 """,
-                connectionLimiter.getMaxConnections(),
-                downloadRateLimiter.getLimit(),
-                uploadRateLimiter.getLimit(),
-                downloadRateLimiter.getLimit()
+                maxConn,
+                rateLimit,
+                uploadLimitJson != null ? String.valueOf(uploadLimitJson) : "null",
+                downloadLimitJson != null ? String.valueOf(downloadLimitJson) : "null"
         );
 
         byte[] data = json.getBytes(StandardCharsets.UTF_8);

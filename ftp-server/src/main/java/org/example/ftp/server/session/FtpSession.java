@@ -285,7 +285,17 @@ public class FtpSession {
     public ServerSocket getPassiveDataSocket() { return passiveDataSocket; }
 
     public void openPassiveDataSocket() throws IOException {
+        // Close previous passive socket (client may issue PASV multiple times)
+        try {
+            closePassiveDataSocket();
+        } catch (IOException ignored) {}
+
         passiveDataSocket = new ServerSocket(0);
+        passiveDataSocket.setReuseAddress(true);
+        // Avoid indefinite hangs: data connection must arrive within timeout
+        try {
+            passiveDataSocket.setSoTimeout(Integer.getInteger("ftp.data.timeoutMs", 15000));
+        } catch (Exception ignored) {}
     }
 
     public void closePassiveDataSocket() throws IOException {
@@ -313,8 +323,7 @@ public class FtpSession {
                 username,
                 authenticated,
                 currentDirectory,
-                homeDirectory,
-                passiveDataSocket
+                homeDirectory
         );
     }
 
@@ -325,6 +334,5 @@ public class FtpSession {
         authenticated = m.isAuthenticated();
         currentDirectory = m.getCurrentDirectory();
         homeDirectory = m.getHomeDirectory();
-        passiveDataSocket = m.getPassiveDataSocket();
     }
 }

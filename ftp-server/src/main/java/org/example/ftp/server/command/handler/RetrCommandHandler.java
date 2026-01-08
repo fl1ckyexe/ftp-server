@@ -3,8 +3,8 @@ package org.example.ftp.server.command.handler;
 import org.example.ftp.common.protocol.FtpResponse;
 import org.example.ftp.common.protocol.Responses;
 import org.example.ftp.server.auth.Permission;
+import org.example.ftp.server.fs.AccessControl;
 import org.example.ftp.server.fs.PathResolver;
-import org.example.ftp.server.fs.log.ServerLogService;
 import org.example.ftp.server.session.FtpSession;
 import org.example.ftp.server.transfer.RateLimiter;
 import org.example.ftp.server.transfer.ThrottledInputStream;
@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -46,16 +47,7 @@ public class RetrCommandHandler extends AbstractCommandHandler {
             return Responses.accessDenied();
         }
 
-        // Проверяем, находится ли путь в home directory пользователя
-        Path home = session.getHomeDirectory().normalize().toAbsolutePath();
-        Path shared = session.getSharedDirectory().normalize().toAbsolutePath();
-        Path resolved = file.normalize().toAbsolutePath();
-        boolean isInHomeDirectory = resolved.startsWith(home);
-        boolean isInSharedDirectory = resolved.startsWith(shared);
-
-        // Если путь находится в home directory, всегда разрешаем (не проверяем глобальные права)
-        // Если путь находится в /shared, проверяем глобальное право READ
-        if (!isInHomeDirectory && isInSharedDirectory && !session.getPermissionService().has(session.getUsername(), Permission.READ)) {
+        if (!AccessControl.can(session, file, Permission.READ)) {
             return Responses.permissionDenied();
         }
 
@@ -79,7 +71,6 @@ public class RetrCommandHandler extends AbstractCommandHandler {
                     OutputStream out = dataConnection.getOutputStream()
             ) {
                 session.setActiveDataConnection(dataConnection);
-                ServerLogService.log("[RETR] Start download user=" + session.getUsername() + " file=" + argument);
                 // Используем буферизованное чтение/запись вместо transferTo для правильной работы rate limiting
                 // Используем меньший буфер для более точного контроля скорости
                 byte[] buffer = new byte[4096];
@@ -103,7 +94,6 @@ public class RetrCommandHandler extends AbstractCommandHandler {
                         out.flush();
                         transferCompleted = true;
                         session.getStatsService().onDownload(session.getUsername(), bytes);
-                        ServerLogService.log("[RETR] Complete user=" + session.getUsername() + " file=" + argument + " bytes=" + bytes);
                     }
                 } catch (IOException e) {
                     // Если соединение закрыто клиентом (отмена), это нормально
@@ -114,7 +104,6 @@ public class RetrCommandHandler extends AbstractCommandHandler {
                             (msg != null && (msg.contains("closed") || msg.contains("reset") || msg.contains("Connection reset")))) {
                         transferCompleted = false;
                     } else {
-                        ServerLogService.log("[RETR] ERROR during transfer: " + msg);
                         throw e; // Другая ошибка - пробрасываем дальше
                     }
                 }
@@ -123,8 +112,10 @@ public class RetrCommandHandler extends AbstractCommandHandler {
                 // we can't access the socket instance here directly, but ABOR will close it anyway
             }
 
+        } catch (SocketTimeoutException e) {
+            // Client didn't open data connection in time
+            return Responses.connectionClosedTransferAborted();
         } catch (IOException e) {
-            ServerLogService.log("[RETR] ERROR during transfer: " + e.getMessage());
             return Responses.connectionClosedTransferAborted();
         } finally {
             session.setActiveDataConnection(null);
@@ -137,7 +128,6 @@ public class RetrCommandHandler extends AbstractCommandHandler {
         if (transferCompleted) {
             return Responses.transferComplete();
         } else {
-            ServerLogService.log("[RETR] Aborted user=" + session.getUsername() + " file=" + argument);
             return Responses.connectionClosedTransferAborted();
         }
     }

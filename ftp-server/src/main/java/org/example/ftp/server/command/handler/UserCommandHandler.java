@@ -4,6 +4,7 @@ import org.example.ftp.common.protocol.FtpReplyCode;
 import org.example.ftp.common.protocol.FtpResponse;
 import org.example.ftp.common.protocol.Responses;
 import org.example.ftp.server.session.FtpSession;
+import org.example.ftp.server.session.AwaitingPasswordState;
 
 public class UserCommandHandler extends AbstractCommandHandler {
 
@@ -28,6 +29,7 @@ public class UserCommandHandler extends AbstractCommandHandler {
         }
 
         session.setPendingUsername(argument);
+        session.setState(new AwaitingPasswordState());
 
         return Responses.ok(
                 FtpReplyCode.USERNAME_OK.getCode(),

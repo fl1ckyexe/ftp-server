@@ -12,7 +12,6 @@ public class FtpServerMain {
             server.start();
         } catch (Throwable t) {
             t.printStackTrace();
-            // If launched with --win-console, keep window open so the error is visible.
             try {
                 if (System.console() != null) {
                     System.out.println();

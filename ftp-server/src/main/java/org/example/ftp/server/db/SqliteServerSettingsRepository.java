@@ -98,6 +98,8 @@ public class SqliteServerSettingsRepository {
             );
         }
 
+        // Only update upload/download limits if explicitly provided (not null)
+        // If null, don't update (keep existing value in DB)
         if (globalUploadLimit != null) {
             db.execute(
                     "UPDATE server_settings SET global_upload_limit = ? WHERE id = 1",
